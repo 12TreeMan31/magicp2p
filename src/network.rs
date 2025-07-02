@@ -23,15 +23,16 @@ const IPFS_BOOT_URL: &str = "/dnsaddr/bootstrap.libp2p.io";
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "Event")]
 pub struct NetworkState {
-    identify: identify::Behaviour,
+    pub identify: identify::Behaviour,
     // rendezvous: rendezvous::client::Behaviour,
-    kademlia: kad::Behaviour<kad::store::MemoryStore>,
+    pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
     // ping: ping::Behaviour,
 }
 
 impl NetworkState {
     pub fn new(pub_key: &PublicKey) -> Self {
-        let kademlia_cfg = kad::Config::new(IPFS_PROTO_NAME);
+        let mut kademlia_cfg = kad::Config::new(IPFS_PROTO_NAME);
+        kademlia_cfg.set_query_timeout(Duration::from_secs(5 * 60));
         let mut kademlia = kad::Behaviour::with_config(
             pub_key.to_peer_id(),
             kad::store::MemoryStore::new(pub_key.to_peer_id()),
