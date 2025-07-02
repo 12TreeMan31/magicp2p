@@ -4,8 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-libp2p = { version = "0.54", features = ["macros", "noise", "ping", "tokio", "yamux", "identify", "quic"] }
+libp2p = { version = "0.54", features = ["macros", "noise", "ping", "dns", "tokio", "yamux", "identify", "quic", "tcp", "rendezvous", "kad"] }
 futures = "0.3.30"
-tokio = { version = "1.37.0", features = ["full"] }
+tokio = { version = "1.37.0", features = ["full", "tracing"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mio = "1.0.4"
+console-subscriber = "0.4.1"
+
+[build]
+rustflags = ["--cfg", "tokio_unstable"]
