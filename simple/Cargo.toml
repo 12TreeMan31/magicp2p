@@ -5,6 +5,6 @@ edition = "2024"
 
 [dependencies]
 futures = "0.3.31"
-libp2p = { version = "0.56", features = ["noise", "dns", "tokio", "yamux", "tcp", "kad", "macros", "identify", "rsa", "gossipsub"] }
-libp2p-identity = { version = "0.2.12", features = ["ed25519"] }
+libp2p = { version = "0.56", features = ["noise", "dns", "tokio", "yamux", "tcp", "kad", "macros", "identify"] }
+libp2p-identity = { version = "0.2.12", features = ["ed25519", "peerid"] }
 tokio = { version = "1.46.1", features = ["full"] }
