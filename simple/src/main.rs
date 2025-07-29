@@ -24,34 +24,32 @@ struct Behaviour {
 }
 
 impl Behaviour {
+    /// Creates a new NetworkBehaviour and also returns the bootstrap QuerryId
     pub fn new(keys: &Keypair) -> (Self, QueryId) {
         let bootstrap_querry_id;
         let peer_id = keys.public().to_peer_id();
 
-        let kademlia = {
-            let cfg = kad::Config::new(kad::PROTOCOL_NAME);
-            let mut kademlia = kad::Behaviour::with_config(peer_id, MemoryStore::new(peer_id), cfg);
+        let kademlia_cfg = kad::Config::new(kad::PROTOCOL_NAME);
+        let mut kademlia =
+            kad::Behaviour::with_config(peer_id, MemoryStore::new(peer_id), kademlia_cfg);
 
-            for addr in IPFS_BOOTNODES {
-                let addr: Multiaddr = addr.parse().expect("Valid multiaddr");
-                let peer_id = match addr.clone().pop().unwrap() {
-                    Protocol::P2p(peer_id) => peer_id,
-                    _ => unimplemented!("Handle this in the real app"),
-                };
+        // We need the peerid but also need the peerid in the multiaddr because reasons.
+        // While it may be overkill, in the real program this will allow us to add custom bootnodes
+        // from just the multiaddr
+        for addr in IPFS_BOOTNODES {
+            let addr: Multiaddr = addr.parse().expect("Valid multiaddr");
+            let peer_id = match addr.clone().pop().unwrap() {
+                Protocol::P2p(peer_id) => peer_id,
+                _ => unimplemented!("Handle this in the real app"),
+            };
 
-                kademlia.add_address(&peer_id, addr);
-            }
-            bootstrap_querry_id = kademlia.bootstrap().expect("Could not bootstrap");
+            kademlia.add_address(&peer_id, addr);
+        }
+        bootstrap_querry_id = kademlia.bootstrap().expect("Could not bootstrap");
 
-            kademlia
-        };
-
-        let identify = {
-            let cfg = identify::Config::new(identify::PROTOCOL_NAME.to_string(), keys.public());
-            let identify = identify::Behaviour::new(cfg);
-
-            identify
-        };
+        let identify_cfg =
+            identify::Config::new(identify::PROTOCOL_NAME.to_string(), keys.public());
+        let identify = identify::Behaviour::new(identify_cfg);
 
         (Self { kademlia, identify }, bootstrap_querry_id)
     }
@@ -121,6 +119,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             let ok = x.expect("Could not provide key");
                             println!("Started providing key: {:?}", ok.key);
                         }
+
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
                         let id = swarm
                             .behaviour_mut()
