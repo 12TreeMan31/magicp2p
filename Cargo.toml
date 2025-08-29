@@ -4,11 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-libp2p = { version = "0.56", features = ["macros", "noise", "dns", "tokio", "yamux", "identify", "tcp", "kad", "rsa", "gossipsub"] }
-futures = "0.3.30"
-tokio = { version = "1.37.0", features = ["full", "tracing"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-console-subscriber = "0.4.1"
+futures = "0.3.31"
+libp2p = { version = "0.56", features = ["noise", "dns", "tokio", "yamux", "tcp", "mdns", "macros", "gossipsub"] }
+libp2p-identity = { version = "0.2.12", features = ["ed25519", "peerid", "rsa"] }
+tokio = { version = "1.46.1", features = ["full"] }
 
 [build]
 # rustflags = ["--cfg", "tokio_unstable"]
