@@ -23,10 +23,7 @@ Once you have that create a ED25519 keypair to give to the swarm.
 
 ```mermaid
 graph LR;
-    A[Starting]
-    B[Discovery]
-
-    A--bootstrap-->B 
+    A[TBD]
 ```
 
 ```
@@ -40,10 +37,9 @@ We add these to the DHT using kademlias `add_address()` and its important to kno
 
 Now you can call `bootstrap()` and you *should* be connected to Amino as a [client](link that explains what a client can do)
 
-While you might be connected to Animo, being a client isn't that useful and limits you a lot in what you can do. In order to use the network to its fullest we need to become a [server](link that talks about servers).
+While you might be connected to Animo, being a client isn't that useful and limits you a lot in what you can do. In order to use the network to its fullest we need to become a [server](https://github.com/libp2p/specs/blob/master/kad-dht/README.md#client-and-server-mode).
 
 In order to become a server there are a couple [requirments](link) we must meet.
 
 See
 https://blog.ipfs.tech/2020-07-20-dht-deep-dive/
-https://mermaid.js.org/
