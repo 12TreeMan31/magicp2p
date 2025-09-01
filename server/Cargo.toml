@@ -1,9 +1,0 @@
-[package]
-name = "server"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-futures = "0.3.31"
-libp2p = { version = "0.56", features = ["noise", "tokio", "yamux", "tcp", "rendezvous", "macros", "gossipsub", "identify"] }
-tokio = { version = "1.46.1", features = ["full"] }
