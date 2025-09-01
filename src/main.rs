@@ -1,10 +1,11 @@
 // https://github.com/ipfs/kubo/blob/master/docs/config.md#addresses
 
+use clap::Parser;
 use futures::prelude::*;
 use libp2p::{
-    SwarmBuilder,
+    Multiaddr, PeerId, SwarmBuilder,
     gossipsub::{self, MessageAuthenticity},
-    mdns, noise,
+    identify, mdns, noise, rendezvous,
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
     tcp, yamux,
 };
@@ -16,12 +17,19 @@ use tokio::{self, io, io::AsyncBufReadExt, select};
 struct Behaviour {
     mdns: mdns::tokio::Behaviour,
     gossipsub: gossipsub::Behaviour,
+    rendezvous: rendezvous::client::Behaviour,
+    identify: identify::Behaviour,
 }
 
 impl Behaviour {
-    /// Creates a new NetworkBehaviour and also returns the bootstrap QuerryId
     pub fn new(keys: &Keypair) -> Self {
         let peer_id = keys.public().to_peer_id();
+
+        let identify_cfg =
+            identify::Config::new_with_signed_peer_record("magic-test/1.0.0".to_string(), keys);
+        let identify = identify::Behaviour::new(identify_cfg);
+
+        let rendezvous = rendezvous::client::Behaviour::new(keys.clone());
 
         let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id).unwrap();
 
@@ -31,37 +39,87 @@ impl Behaviour {
             gossipsub::Behaviour::new(MessageAuthenticity::Signed(keys.clone()), gossipsub_cfg)
                 .unwrap();
 
-        Self { mdns, gossipsub }
+        Self {
+            mdns,
+            gossipsub,
+            identify,
+            rendezvous,
+        }
     }
 }
 
-fn network_event(swarm: &mut Swarm<Behaviour>, event: SwarmEvent<BehaviourEvent>) {
+fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
     match event {
-        SwarmEvent::Behaviour(BehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
-            for (id, addr) in list {
-                println!("New Peer {addr}");
-                swarm.behaviour_mut().gossipsub.add_explicit_peer(&id);
+        BehaviourEvent::Gossipsub(e) => match e {
+            gossipsub::Event::Message {
+                propagation_source: peer_id,
+                message,
+                ..
+            } => println!("<{peer_id}>: {}", String::from_utf8_lossy(&message.data)),
+            event => println!("Unhandled: {:?}", event),
+        },
+        BehaviourEvent::Identify(e) => println!("{:?}", e),
+        BehaviourEvent::Mdns(e) => match e {
+            mdns::Event::Discovered(list) => {
+                for (id, addr) in list {
+                    println!("New Peer {addr}");
+                    swarm.behaviour_mut().gossipsub.add_explicit_peer(&id);
+                }
             }
-        }
-        SwarmEvent::Behaviour(BehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
-            for (id, addr) in list {
-                println!("Remove Peer {addr}");
-                swarm.behaviour_mut().gossipsub.remove_blacklisted_peer(&id);
+            mdns::Event::Expired(list) => {
+                for (id, addr) in list {
+                    println!("Remove Peer {addr}");
+                    swarm.behaviour_mut().gossipsub.remove_blacklisted_peer(&id);
+                }
             }
-        }
-        SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
-            propagation_source: peer_id,
-            message,
-            ..
-        })) => {
-            println!("<{peer_id}>: {}", String::from_utf8_lossy(&message.data),)
-        }
-        _ => {}
+        },
+        BehaviourEvent::Rendezvous(e) => println!("{:?}", e),
     }
+}
+
+fn network(
+    swarm: &mut Swarm<Behaviour>,
+    event: SwarmEvent<BehaviourEvent>,
+    homeserver: &Multiaddr,
+    homeid: &PeerId,
+) {
+    match event {
+        SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {}", address),
+        SwarmEvent::Behaviour(netinfo) => network_handle(swarm, netinfo),
+        SwarmEvent::ExternalAddrConfirmed { address } => {
+            println!("External address confirmed: {address}");
+            if address == *homeserver {
+                swarm
+                    .behaviour_mut()
+                    .rendezvous
+                    .register(
+                        rendezvous::Namespace::from_static("magic-test"),
+                        *homeid,
+                        None,
+                    )
+                    .unwrap();
+            }
+        }
+        event => println!("Unhandled: {:?}", event),
+    }
+}
+
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(short, long)]
+    rhomeserver: String,
+
+    #[arg(short, long)]
+    id: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let args = Args::parse();
+    let homeserver: Multiaddr = args.rhomeserver.parse()?;
+    let homeid: PeerId = args.id.parse()?;
+
     let keys = Keypair::generate_ed25519();
     println!("Local PeerID {}", keys.public().to_peer_id());
 
@@ -80,6 +138,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut stdin = io::BufReader::new(io::stdin()).lines();
 
+    swarm.add_external_address(homeserver.clone());
+
     let topic = gossipsub::IdentTopic::new("hi-dave");
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
 
@@ -92,7 +152,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     println!("Publish error: {e:?}");
                 }
             }
-            event = swarm.select_next_some() => network_event(&mut swarm, event)
+            event = swarm.select_next_some() => network(&mut swarm, event, &homeserver, &homeid)
         }
     }
 }

@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 futures = "0.3.31"
-libp2p = { version = "0.56", features = ["noise", "dns", "tokio", "yamux", "tcp", "mdns", "macros", "gossipsub"] }
+libp2p = { version = "0.56", features = ["noise", "dns", "tokio", "yamux", "tcp", "mdns", "macros", "gossipsub", "rendezvous", "identify"] }
 libp2p-identity = { version = "0.2.12", features = ["ed25519", "peerid", "rsa"] }
 tokio = { version = "1.46.1", features = ["full"] }
 
