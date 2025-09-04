@@ -3,11 +3,11 @@
 use clap::Parser;
 use futures::prelude::*;
 use libp2p::{
-    Multiaddr, PeerId, SwarmBuilder,
+    Multiaddr, SwarmBuilder,
     autonat::v2 as autonat,
     gossipsub::{self, MessageAuthenticity},
     identify, mdns, noise, rendezvous,
-    swarm::{NetworkBehaviour, Swarm, SwarmEvent, dial_opts::DialOpts},
+    swarm::{self, ConnectionId, NetworkBehaviour, Swarm, SwarmEvent, dial_opts::DialOpts},
     tcp, yamux,
 };
 use libp2p_identity::Keypair;
@@ -53,6 +53,19 @@ impl Behaviour {
     }
 }
 
+fn dial_remote(
+    swarm: &mut Swarm<Behaviour>,
+    addr: &Multiaddr,
+) -> Result<ConnectionId, swarm::DialError> {
+    let dialer = DialOpts::unknown_peer_id().address(addr.clone()).build();
+    let id = dialer.connection_id();
+    swarm.dial(dialer)?;
+
+    swarm.add_external_address(addr.clone());
+
+    Ok(id)
+}
+
 fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
     match event {
         BehaviourEvent::Gossipsub(e) => match e {
@@ -92,28 +105,33 @@ fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
     }
 }
 
-fn network(
-    swarm: &mut Swarm<Behaviour>,
-    event: SwarmEvent<BehaviourEvent>,
-    homeserver: &Multiaddr,
-    homeid: &PeerId,
-) {
+fn network(swarm: &mut Swarm<Behaviour>, event: SwarmEvent<BehaviourEvent>, id: &ConnectionId) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {}", address),
         SwarmEvent::Behaviour(netinfo) => network_handle(swarm, netinfo),
         SwarmEvent::ExternalAddrConfirmed { address } => {
             println!("External address confirmed: {address}");
-            swarm.add_external_address(address.clone());
-            if address == *homeserver {
+        }
+        SwarmEvent::ConnectionEstablished {
+            peer_id,
+            connection_id,
+            established_in,
+            ..
+        } => {
+            if connection_id == *id {
                 swarm
                     .behaviour_mut()
                     .rendezvous
                     .register(
                         rendezvous::Namespace::from_static("magic-test"),
-                        *homeid,
+                        peer_id,
                         None,
                     )
                     .unwrap();
+                println!(
+                    "Connected to server in {} seconds",
+                    established_in.as_secs()
+                );
             }
         }
         event => println!("Unhandled: {:?}", event),
@@ -122,19 +140,15 @@ fn network(
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
-struct Args {
+struct Opt {
     #[arg(short, long)]
-    rhomeserver: String,
-
-    #[arg(short, long)]
-    id: String,
+    bootnode: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse();
-    let homeserver: Multiaddr = args.rhomeserver.parse()?;
-    let homeid: PeerId = args.id.parse()?;
+    let args: Opt = Opt::parse();
+    let bootnode: Multiaddr = args.bootnode.parse()?;
 
     let keys = Keypair::generate_ed25519();
     println!("Local PeerID {}", keys.public().to_peer_id());
@@ -154,8 +168,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut stdin = io::BufReader::new(io::stdin()).lines();
 
-    // swarm.add_external_address(homeserver.clone());
-    swarm.dial(homeserver.clone())?;
+    let watched_connection = dial_remote(&mut swarm, &bootnode)?;
 
     let topic = gossipsub::IdentTopic::new("hi-dave");
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
@@ -169,7 +182,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     println!("Publish error: {e:?}");
                 }
             }
-            event = swarm.select_next_some() => network(&mut swarm, event, &homeserver, &homeid)
+            event = swarm.select_next_some() => network(&mut swarm, event, &watched_connection)
         }
     }
 }
