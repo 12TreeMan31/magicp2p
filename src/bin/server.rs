@@ -1,6 +1,8 @@
 use futures::StreamExt;
 use libp2p::{
-    SwarmBuilder, identify,
+    SwarmBuilder,
+    autonat::v2 as autonat,
+    identify,
     identity::Keypair,
     noise, rendezvous,
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
@@ -12,6 +14,7 @@ use std::error::Error;
 struct Behaviour {
     rendezvous: rendezvous::server::Behaviour,
     identify: identify::Behaviour,
+    autonat: autonat::server::Behaviour,
 }
 
 impl Behaviour {
@@ -23,17 +26,38 @@ impl Behaviour {
         let rendezvous_cfg = rendezvous::server::Config::default();
         let rendezvous = rendezvous::server::Behaviour::new(rendezvous_cfg);
 
+        let autonat = autonat::server::Behaviour::default();
+
         Self {
             rendezvous,
             identify,
+            autonat,
         }
     }
 }
 
 fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
     match event {
-        BehaviourEvent::Identify(e) => println!("{:?}", e),
+        BehaviourEvent::Identify(e) => match e {
+            identify::Event::Received { peer_id, info, .. } => {
+                println!("Found peer: {}", peer_id);
+            }
+            identify::Event::Error { peer_id, error, .. } => {
+                println!("Error with {} getting peer info: {}", peer_id, error);
+            }
+            _ => {}
+        },
         BehaviourEvent::Rendezvous(e) => println!("{:?}", e),
+        BehaviourEvent::Autonat(e) => {
+            if e.result.is_ok() {
+                println!("Autonat: External address confirmed: {}", e.tested_addr);
+                return;
+            }
+            println!(
+                "Autonat: Sent {} bytes; test failed for {} on {}",
+                e.data_amount, e.client, e.tested_addr
+            );
+        }
     }
 }
 

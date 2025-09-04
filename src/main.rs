@@ -4,9 +4,10 @@ use clap::Parser;
 use futures::prelude::*;
 use libp2p::{
     Multiaddr, PeerId, SwarmBuilder,
+    autonat::v2 as autonat,
     gossipsub::{self, MessageAuthenticity},
     identify, mdns, noise, rendezvous,
-    swarm::{NetworkBehaviour, Swarm, SwarmEvent},
+    swarm::{NetworkBehaviour, Swarm, SwarmEvent, dial_opts::DialOpts},
     tcp, yamux,
 };
 use libp2p_identity::Keypair;
@@ -19,6 +20,7 @@ struct Behaviour {
     gossipsub: gossipsub::Behaviour,
     rendezvous: rendezvous::client::Behaviour,
     identify: identify::Behaviour,
+    autonat: autonat::client::Behaviour,
 }
 
 impl Behaviour {
@@ -39,11 +41,14 @@ impl Behaviour {
             gossipsub::Behaviour::new(MessageAuthenticity::Signed(keys.clone()), gossipsub_cfg)
                 .unwrap();
 
+        let autonat = autonat::client::Behaviour::default();
+
         Self {
             mdns,
             gossipsub,
             identify,
             rendezvous,
+            autonat,
         }
     }
 }
@@ -74,6 +79,16 @@ fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
             }
         },
         BehaviourEvent::Rendezvous(e) => println!("{:?}", e),
+        BehaviourEvent::Autonat(e) => {
+            if e.result.is_ok() {
+                println!("Autonat: External address confirmed: {}", e.tested_addr);
+                return;
+            }
+            println!(
+                "Autonat: Got {} bytes on {} to {} and failed: {:?}",
+                e.bytes_sent, e.tested_addr, e.server, e.result
+            );
+        }
     }
 }
 
@@ -88,6 +103,7 @@ fn network(
         SwarmEvent::Behaviour(netinfo) => network_handle(swarm, netinfo),
         SwarmEvent::ExternalAddrConfirmed { address } => {
             println!("External address confirmed: {address}");
+            swarm.add_external_address(address.clone());
             if address == *homeserver {
                 swarm
                     .behaviour_mut()
@@ -138,7 +154,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut stdin = io::BufReader::new(io::stdin()).lines();
 
-    swarm.add_external_address(homeserver.clone());
+    // swarm.add_external_address(homeserver.clone());
+    swarm.dial(homeserver.clone())?;
 
     let topic = gossipsub::IdentTopic::new("hi-dave");
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
