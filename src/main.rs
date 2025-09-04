@@ -1,60 +1,18 @@
-// https://github.com/ipfs/kubo/blob/master/docs/config.md#addresses
-
 use clap::Parser;
 use futures::prelude::*;
 use libp2p::{
-    Multiaddr, SwarmBuilder,
-    autonat::v2 as autonat,
-    gossipsub::{self, MessageAuthenticity},
-    identify, mdns, noise, rendezvous,
-    swarm::{self, ConnectionId, NetworkBehaviour, Swarm, SwarmEvent, dial_opts::DialOpts},
+    Multiaddr, SwarmBuilder, gossipsub, mdns, noise, rendezvous,
+    swarm::{self, ConnectionId, Swarm, SwarmEvent, dial_opts::DialOpts},
     tcp, yamux,
 };
 use libp2p_identity::Keypair;
 use std::error::Error;
 use tokio::{self, io, io::AsyncBufReadExt, select};
 
-#[derive(NetworkBehaviour)]
-struct Behaviour {
-    mdns: mdns::tokio::Behaviour,
-    gossipsub: gossipsub::Behaviour,
-    rendezvous: rendezvous::client::Behaviour,
-    identify: identify::Behaviour,
-    autonat: autonat::client::Behaviour,
-}
-
-impl Behaviour {
-    pub fn new(keys: &Keypair) -> Self {
-        let peer_id = keys.public().to_peer_id();
-
-        let identify_cfg =
-            identify::Config::new_with_signed_peer_record("magic-test/1.0.0".to_string(), keys);
-        let identify = identify::Behaviour::new(identify_cfg);
-
-        let rendezvous = rendezvous::client::Behaviour::new(keys.clone());
-
-        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id).unwrap();
-
-        // Set a custom gossipsub configuration
-        let gossipsub_cfg = gossipsub::ConfigBuilder::default().build().unwrap();
-        let gossipsub =
-            gossipsub::Behaviour::new(MessageAuthenticity::Signed(keys.clone()), gossipsub_cfg)
-                .unwrap();
-
-        let autonat = autonat::client::Behaviour::default();
-
-        Self {
-            mdns,
-            gossipsub,
-            identify,
-            rendezvous,
-            autonat,
-        }
-    }
-}
+use magicp2p::behaviour::{MainBehaviour, MainBehaviourEvent};
 
 fn dial_remote(
-    swarm: &mut Swarm<Behaviour>,
+    swarm: &mut Swarm<MainBehaviour>,
     addr: &Multiaddr,
 ) -> Result<ConnectionId, swarm::DialError> {
     let dialer = DialOpts::unknown_peer_id().address(addr.clone()).build();
@@ -66,9 +24,9 @@ fn dial_remote(
     Ok(id)
 }
 
-fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
+fn network_handle(swarm: &mut Swarm<MainBehaviour>, event: MainBehaviourEvent) {
     match event {
-        BehaviourEvent::Gossipsub(e) => match e {
+        MainBehaviourEvent::Gossipsub(e) => match e {
             gossipsub::Event::Message {
                 propagation_source: peer_id,
                 message,
@@ -76,8 +34,8 @@ fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
             } => println!("<{peer_id}>: {}", String::from_utf8_lossy(&message.data)),
             event => println!("Unhandled: {:?}", event),
         },
-        BehaviourEvent::Identify(e) => println!("{:?}", e),
-        BehaviourEvent::Mdns(e) => match e {
+        MainBehaviourEvent::Identify(e) => println!("{:?}", e),
+        MainBehaviourEvent::Mdns(e) => match e {
             mdns::Event::Discovered(list) => {
                 for (id, addr) in list {
                     println!("New Peer {addr}");
@@ -91,8 +49,8 @@ fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
                 }
             }
         },
-        BehaviourEvent::Rendezvous(e) => println!("{:?}", e),
-        BehaviourEvent::Autonat(e) => {
+        MainBehaviourEvent::Rendezvous(e) => println!("{:?}", e),
+        MainBehaviourEvent::Autonat(e) => {
             if e.result.is_ok() {
                 println!("Autonat: External address confirmed: {}", e.tested_addr);
                 return;
@@ -105,7 +63,11 @@ fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
     }
 }
 
-fn network(swarm: &mut Swarm<Behaviour>, event: SwarmEvent<BehaviourEvent>, id: &ConnectionId) {
+fn network(
+    swarm: &mut Swarm<MainBehaviour>,
+    event: SwarmEvent<MainBehaviourEvent>,
+    id: &ConnectionId,
+) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {}", address),
         SwarmEvent::Behaviour(netinfo) => network_handle(swarm, netinfo),
@@ -161,7 +123,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             yamux::Config::default,
         )?
         .with_dns()?
-        .with_behaviour(|keys| Behaviour::new(keys))?
+        .with_behaviour(|keys| MainBehaviour::new(keys, true))?
         .build();
     swarm.listen_on("/ip6/::/tcp/0".parse()?)?;
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
