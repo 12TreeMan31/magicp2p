@@ -3,7 +3,7 @@ use libp2p::{
     gossipsub::{self, MessageAuthenticity},
     identify,
     identity::Keypair,
-    mdns, rendezvous,
+    mdns, relay, rendezvous,
     swarm::{NetworkBehaviour, behaviour::toggle::Toggle},
 };
 
@@ -15,6 +15,7 @@ pub struct MainBehaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub rendezvous: rendezvous::client::Behaviour,
     pub autonat: autonat::v2::client::Behaviour,
+    pub relay: relay::Behaviour,
 
     pub mdns: Toggle<mdns::tokio::Behaviour>,
 }
@@ -36,6 +37,9 @@ impl MainBehaviour {
 
         let autonat = autonat::v2::client::Behaviour::default();
 
+        let relay_cfg = relay::Config::default();
+        let relay = relay::Behaviour::new(peer_id, relay_cfg);
+
         let mdns = if has_mdns {
             let mdns_cfg = mdns::Config::default();
             let mdns = mdns::tokio::Behaviour::new(mdns_cfg, peer_id).unwrap();
@@ -49,6 +53,7 @@ impl MainBehaviour {
             gossipsub,
             rendezvous,
             autonat,
+            relay,
             mdns,
         }
     }

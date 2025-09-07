@@ -60,6 +60,7 @@ fn network_handle(swarm: &mut Swarm<MainBehaviour>, event: MainBehaviourEvent) {
                 e.bytes_sent, e.tested_addr, e.server, e.result
             );
         }
+        _ => {}
     }
 }
 
@@ -103,8 +104,12 @@ fn network(
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Opt {
-    #[arg(short, long)]
+    /// Connects client to the server at the provided multiaddr
+    #[arg(short, long, value_name = "multiaddr")]
     bootnode: String,
+    /// Disables mDNS
+    #[arg(short, long)]
+    mdns: bool,
 }
 
 #[tokio::main]
@@ -123,7 +128,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             yamux::Config::default,
         )?
         .with_dns()?
-        .with_behaviour(|keys| MainBehaviour::new(keys, true))?
+        .with_behaviour(|keys| MainBehaviour::new(keys, !args.mdns))?
         .build();
     swarm.listen_on("/ip6/::/tcp/0".parse()?)?;
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
