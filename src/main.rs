@@ -1,7 +1,7 @@
 use clap::Parser;
 use futures::prelude::*;
 use libp2p::{
-    Multiaddr, SwarmBuilder, gossipsub, mdns, noise, rendezvous,
+    Multiaddr, SwarmBuilder, gossipsub, identify, mdns, noise, rendezvous,
     swarm::{self, ConnectionId, Swarm, SwarmEvent, dial_opts::DialOpts},
     tcp, yamux,
 };
@@ -10,6 +10,15 @@ use std::error::Error;
 use tokio::{self, io, io::AsyncBufReadExt, select};
 
 use magicp2p::behaviour::{MainBehaviour, MainBehaviourEvent};
+
+// Fun little thing
+const BANNER: &str = r#"                       _           ____        
+ _ __ ___   __ _  __ _(_) ___ _ __|___ \ _ __  
+| '_ ` _ \ / _` |/ _` | |/ __| '_ \ __) | '_ \ 
+| | | | | | (_| | (_| | | (__| |_) / __/| |_) |
+|_| |_| |_|\__,_|\__, |_|\___| .__/_____| .__/ 
+                 |___/       |_|        |_|    
+"#;
 
 fn dial_remote(
     swarm: &mut Swarm<MainBehaviour>,
@@ -34,7 +43,15 @@ fn network_handle(swarm: &mut Swarm<MainBehaviour>, event: MainBehaviourEvent) {
             } => println!("<{peer_id}>: {}", String::from_utf8_lossy(&message.data)),
             event => println!("Unhandled: {:?}", event),
         },
-        MainBehaviourEvent::Identify(e) => println!("{:?}", e),
+        MainBehaviourEvent::Identify(e) => match e {
+            identify::Event::Received { peer_id, .. } => {
+                println!("Found peer: {}", peer_id);
+            }
+            identify::Event::Error { peer_id, error, .. } => {
+                println!("Error with {} getting peer info: {}", peer_id, error);
+            }
+            _ => {}
+        },
         MainBehaviourEvent::Mdns(e) => match e {
             mdns::Event::Discovered(list) => {
                 for (id, addr) in list {
@@ -104,9 +121,12 @@ fn network(
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Opt {
-    /// Connects client to the server at the provided multiaddr
+    /// Connects client to the server at the provided multiaddr. Starts in server mode if none is given.
     #[arg(short, long, value_name = "multiaddr")]
-    bootnode: String,
+    bootnode: Option<String>,
+    /// multiaddr that the client will be listening on.
+    #[arg(short, long, value_name = "multiaddr", default_value = "/ip6/::1")]
+    address: Vec<String>,
     /// Disables mDNS
     #[arg(short, long)]
     mdns: bool,
@@ -115,7 +135,6 @@ struct Opt {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args: Opt = Opt::parse();
-    let bootnode: Multiaddr = args.bootnode.parse()?;
 
     let keys = Keypair::generate_ed25519();
     println!("Local PeerID {}", keys.public().to_peer_id());
@@ -130,15 +149,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_dns()?
         .with_behaviour(|keys| MainBehaviour::new(keys, !args.mdns))?
         .build();
-    swarm.listen_on("/ip6/::/tcp/0".parse()?)?;
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    for addr in args.address {
+        swarm.listen_on(format!("{}/tcp/0", addr).parse()?)?;
+        // swarm.listen_on(format!("{}/udp/0/quic-v1", addr).parse()?)?;
+    }
 
     let mut stdin = io::BufReader::new(io::stdin()).lines();
 
-    let watched_connection = dial_remote(&mut swarm, &bootnode)?;
+    let mut watched_connection = ConnectionId::new_unchecked(0);
+    if let Some(bootnode) = args.bootnode {
+        let bootnode: Multiaddr = bootnode.parse()?;
+        watched_connection = dial_remote(&mut swarm, &bootnode)?;
+    } else {
+        println!("Starting in server mode!");
+    }
 
     let topic = gossipsub::IdentTopic::new("hi-dave");
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
+
+    print!("{}", BANNER);
 
     loop {
         select! {
