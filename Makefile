@@ -1,2 +1,3 @@
-run: 
-	RUSTFLAGS="--cfg tokio_unstable" cargo run
+server:
+	@export RUST_LOG=info; \
+	cargo run --bin server

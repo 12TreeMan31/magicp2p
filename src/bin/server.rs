@@ -9,6 +9,17 @@ use libp2p::{
     tcp, yamux,
 };
 use std::error::Error;
+use tracing::{error, info, warn};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
+// Fun little thing
+const BANNER: &str = r#"                       _           ____        
+ _ __ ___   __ _  __ _(_) ___ _ __|___ \ _ __  
+| '_ ` _ \ / _` |/ _` | |/ __| '_ \ __) | '_ \ 
+| | | | | | (_| | (_| | | (__| |_) / __/| |_) |
+|_| |_| |_|\__,_|\__, |_|\___| .__/_____| .__/ 
+                 |___/       |_|        |_|    
+"#;
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
@@ -45,26 +56,26 @@ fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
     match event {
         BehaviourEvent::Identify(e) => match e {
             identify::Event::Received { peer_id, info, .. } => {
-                println!("Found peer: {}", peer_id);
+                info!("Found peer {}: supports {:#?}", peer_id, info.protocols);
             }
             identify::Event::Error { peer_id, error, .. } => {
-                println!("Error with {} getting peer info: {}", peer_id, error);
+                error!("Error with {} getting peer info: {}", peer_id, error);
             }
             _ => {}
         },
         BehaviourEvent::Rendezvous(e) => match e {
-            rendezvous::server::Event::PeerRegistered { peer, registration } => println!(
+            rendezvous::server::Event::PeerRegistered { peer, registration } => info!(
                 "rendezvous: Regestered: {} to {}: TTL {}",
                 peer, registration.namespace, registration.ttl
             ),
             rendezvous::server::Event::PeerUnregistered { peer, namespace } => {
-                println!("rendezvous: Deregestered {} from {}", peer, namespace)
+                info!("rendezvous: Deregestered {} from {}", peer, namespace)
             }
             rendezvous::server::Event::PeerNotRegistered {
                 peer,
                 namespace,
                 error,
-            } => println!(
+            } => warn!(
                 "rendezvous: Failed to regester: {} to {}: {:?}",
                 peer, namespace, error
             ),
@@ -72,10 +83,10 @@ fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
         },
         BehaviourEvent::Autonat(e) => {
             if e.result.is_ok() {
-                println!("Autonat: External address confirmed: {}", e.tested_addr);
+                info!("Autonat: External address confirmed: {}", e.tested_addr);
                 return;
             }
-            println!(
+            info!(
                 "Autonat: Sent {} bytes; test failed for {} on {}",
                 e.data_amount, e.client, e.tested_addr
             );
@@ -86,9 +97,12 @@ fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let keys = Keypair::generate_ed25519();
-    println!("Local PeerID {}", keys.public().to_peer_id());
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(EnvFilter::from_default_env())
+        .init();
 
+    let keys = Keypair::generate_ed25519();
     let mut swarm = SwarmBuilder::with_existing_identity(keys.clone())
         .with_tokio()
         .with_tcp(
@@ -101,18 +115,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on("/ip6/::/tcp/8011".parse()?)?;
     swarm.listen_on("/ip4/0.0.0.0/tcp/8011".parse()?)?;
 
+    println!("{}", BANNER);
+
     loop {
         let event = swarm.select_next_some().await;
         match event {
-            SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {}", address),
+            SwarmEvent::NewListenAddr { address, .. } => info!("Listening on {}", address),
             SwarmEvent::Behaviour(netinfo) => network_handle(&mut swarm, netinfo),
             SwarmEvent::ConnectionEstablished {
                 peer_id,
                 established_in: inter,
                 ..
-            } => println!("Connected to {} in {}ms", peer_id, inter.as_millis()),
+            } => info!("Connected to {} in {}ms", peer_id, inter.as_millis()),
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
-                println!("Connection closed for {}: {:?}", peer_id, cause)
+                info!("Connection closed for {}: {:?}", peer_id, cause)
             }
             _ => {}
         }

@@ -8,6 +8,7 @@ use libp2p::{
 use libp2p_identity::Keypair;
 use std::error::Error;
 use tokio::{self, io, io::AsyncBufReadExt, select};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use magicp2p::behaviour::{MainBehaviour, MainBehaviourEvent};
 
@@ -33,6 +34,8 @@ fn dial_remote(
     Ok(id)
 }
 
+fn rendezvous_handle() {}
+
 fn network_handle(swarm: &mut Swarm<MainBehaviour>, event: MainBehaviourEvent) {
     match event {
         MainBehaviourEvent::Gossipsub(e) => match e {
@@ -41,11 +44,18 @@ fn network_handle(swarm: &mut Swarm<MainBehaviour>, event: MainBehaviourEvent) {
                 message,
                 ..
             } => println!("<{peer_id}>: {}", String::from_utf8_lossy(&message.data)),
+            gossipsub::Event::Subscribed { peer_id, .. } => {
+                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                swarm.dial(DialOpts::peer_id(peer_id).build()).unwrap();
+            }
             event => println!("Unhandled: {:?}", event),
         },
         MainBehaviourEvent::Identify(e) => match e {
-            identify::Event::Received { peer_id, .. } => {
+            identify::Event::Received { peer_id, info, .. } => {
                 println!("Found peer: {}", peer_id);
+                for addr in info.listen_addrs {
+                    swarm.add_external_address(addr);
+                }
             }
             identify::Event::Error { peer_id, error, .. } => {
                 println!("Error with {} getting peer info: {}", peer_id, error);
@@ -134,6 +144,11 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(EnvFilter::from_default_env())
+        .init();
+
     let args: Opt = Opt::parse();
 
     let keys = Keypair::generate_ed25519();
