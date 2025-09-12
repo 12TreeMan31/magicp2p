@@ -1,7 +1,7 @@
 use clap::Parser;
 use futures::prelude::*;
 use libp2p::{
-    Multiaddr, SwarmBuilder, gossipsub,
+    Multiaddr, PeerId, SwarmBuilder, gossipsub,
     identity::Keypair,
     noise, rendezvous,
     swarm::{self, ConnectionId, Swarm, SwarmEvent, dial_opts::DialOpts},
@@ -34,10 +34,15 @@ fn dial_remote(
     Ok(id)
 }
 
-fn input_processing(net: &NetworkInfo, behaviour: &mut MainBehaviour, input: String) {
+fn input_processing(
+    net: &NetworkInfo,
+    behaviour: &mut MainBehaviour,
+    input: String,
+    REMOVE: &PeerId,
+) {
     if input.starts_with(':') {
         if input.contains("scan") {
-            behaviour.get_peers(&net.get_rendezvous()[0]);
+            behaviour.get_peers(REMOVE);
         }
     }
 }
@@ -55,7 +60,7 @@ fn network(
                 match x {
                     SwarmOpts::Mdns(v) => {
                         for dial in v {
-                            swarm.dial(dial).unwrap();
+                            swarm.dial(dial);
                         }
                     }
                     SwarmOpts::Rendezvous(reg, _) => {
@@ -63,7 +68,7 @@ fn network(
                             let dial = DialOpts::peer_id(peer.record.peer_id())
                                 .addresses(peer.record.addresses().to_vec())
                                 .build();
-                            swarm.dial(dial).unwrap();
+                            swarm.dial(dial);
                         }
                     }
                     SwarmOpts::Disconnect(peer_id) => {}
@@ -108,6 +113,9 @@ struct Opt {
     /// Disables mDNS
     #[arg(short, long)]
     mdns: bool,
+    /// REMOVE
+    #[arg(short, long)]
+    id: String,
 }
 
 #[tokio::main]
@@ -118,6 +126,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     let args: Opt = Opt::parse();
+    let REMOVE: PeerId = args.id.parse()?;
 
     let keys = Keypair::generate_ed25519();
     let mut swarm = SwarmBuilder::with_existing_identity(keys.clone())
@@ -159,7 +168,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         select! {
             Ok(Some(line)) = stdin.next_line() => {
-                input_processing(&mut netin, swarm.behaviour_mut(), line.clone());
+                input_processing(&mut netin, swarm.behaviour_mut(), line.clone(), &REMOVE);
                 if let Err(e) = swarm
                     .behaviour_mut().gossipsub
                     .publish(topic.clone(), line.as_bytes()) {
