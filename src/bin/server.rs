@@ -8,18 +8,10 @@ use libp2p::{
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
     tcp, yamux,
 };
+use magicp2p::{self, behaviour::PROGRAM_PROTOCOL};
 use std::error::Error;
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-
-// Fun little thing
-const BANNER: &str = r#"                       _           ____        
- _ __ ___   __ _  __ _(_) ___ _ __|___ \ _ __  
-| '_ ` _ \ / _` |/ _` | |/ __| '_ \ __) | '_ \ 
-| | | | | | (_| | (_| | | (__| |_) / __/| |_) |
-|_| |_| |_|\__,_|\__, |_|\___| .__/_____| .__/ 
-                 |___/       |_|        |_|    
-"#;
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
@@ -32,7 +24,7 @@ struct Behaviour {
 impl Behaviour {
     pub fn new(keys: &Keypair) -> Self {
         let identify_cfg =
-            identify::Config::new_with_signed_peer_record("magic-test/1.0.0".to_string(), keys);
+            identify::Config::new_with_signed_peer_record(PROGRAM_PROTOCOL.to_string(), keys);
         let identify = identify::Behaviour::new(identify_cfg);
 
         let rendezvous_cfg = rendezvous::server::Config::default();
@@ -65,11 +57,11 @@ fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
         },
         BehaviourEvent::Rendezvous(e) => match e {
             rendezvous::server::Event::PeerRegistered { peer, registration } => info!(
-                "rendezvous: Regestered: {} to {}: TTL {}",
+                target: "rendezvous", "Regestered: {} to {}: TTL {}",
                 peer, registration.namespace, registration.ttl
             ),
             rendezvous::server::Event::PeerUnregistered { peer, namespace } => {
-                info!("rendezvous: Deregestered {} from {}", peer, namespace)
+                info!(target: "rendezvous", "Deregestered {} from {}", peer, namespace)
             }
             rendezvous::server::Event::PeerNotRegistered {
                 peer,
@@ -84,12 +76,12 @@ fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
         BehaviourEvent::Autonat(e) => {
             if e.result.is_ok() {
                 info!("Autonat: External address confirmed: {}", e.tested_addr);
-                return;
+            } else {
+                info!(
+                    "Autonat: Sent {} bytes; test failed for {} on {}",
+                    e.data_amount, e.client, e.tested_addr
+                );
             }
-            info!(
-                "Autonat: Sent {} bytes; test failed for {} on {}",
-                e.data_amount, e.client, e.tested_addr
-            );
         }
         _ => {}
     }
@@ -115,7 +107,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on("/ip6/::/tcp/8011".parse()?)?;
     swarm.listen_on("/ip4/0.0.0.0/tcp/8011".parse()?)?;
 
-    println!("{}", BANNER);
+    println!("{}", magicp2p::BANNER);
 
     loop {
         let event = swarm.select_next_some().await;
