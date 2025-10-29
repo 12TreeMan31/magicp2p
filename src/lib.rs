@@ -8,3 +8,5 @@ pub const BANNER: &str = r#"
 "#;
 
 pub mod behaviour;
+pub mod events;
+mod socket;

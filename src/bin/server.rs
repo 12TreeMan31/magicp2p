@@ -2,7 +2,7 @@ use futures::StreamExt;
 use libp2p::{
     Swarm, SwarmBuilder,
     autonat::v2 as autonat,
-    identify,
+    gossipsub, identify,
     identity::Keypair,
     noise, relay, rendezvous,
     swarm::{NetworkBehaviour, SwarmEvent},
@@ -15,6 +15,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
+    gossipsub: gossipsub::Behaviour,
     rendezvous: rendezvous::server::Behaviour,
     identify: identify::Behaviour,
     autonat: autonat::server::Behaviour,
@@ -35,7 +36,15 @@ impl Behaviour {
         let relay_cfg = relay::Config::default();
         let relay = relay::Behaviour::new(keys.public().to_peer_id(), relay_cfg);
 
+        let gossipsub_cfg = gossipsub::Config::default();
+        let gossipsub = gossipsub::Behaviour::new(
+            gossipsub::MessageAuthenticity::Signed(keys.clone()),
+            gossipsub_cfg,
+        )
+        .unwrap();
+
         Self {
+            gossipsub,
             rendezvous,
             identify,
             autonat,
@@ -90,6 +99,7 @@ fn network_handle(event: BehaviourEvent, swarm: &Swarm<Behaviour>) {
             }
         }
         BehaviourEvent::Relay(event) => info!("{:?}", event),
+        BehaviourEvent::Gossipsub(_) => {}
     }
 }
 
@@ -114,6 +124,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on("/ip4/0.0.0.0/tcp/8011".parse()?)?;
 
     println!("{}", magicp2p::BANNER);
+
+    /* REMOVE
+     * I just want to have something that works
+     */
+    let temp_topic = gossipsub::IdentTopic::new("magic");
+    swarm.behaviour_mut().gossipsub.subscribe(&temp_topic)?;
 
     loop {
         let event = swarm.select_next_some().await;
