@@ -1,6 +1,5 @@
 # magicp2p
 
-## Steps in order to connect to Amino
 Make sure you have support to RSA and ED25519 in libp2p-identity
 RSA is the old standard that is being [fazed out](link).
 Once you have that create a ED25519 keypair to give to the swarm.

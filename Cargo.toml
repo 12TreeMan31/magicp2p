@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+serde = { version = "1.0", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
 futures = "0.3.31"
-libp2p = { version = "0.56", features = ["noise", "dns", "tokio", "yamux", "tcp", "mdns", "macros", "gossipsub", "relay", "rendezvous", "identify", "autonat"] }
+libp2p = { version = "0.56", features = ["noise", "dns", "tokio", "yamux", "tcp", "mdns", "macros", "gossipsub", "relay", "rendezvous", "identify", "autonat", "request-response", "cbor", "ping"] }
 libp2p-identity = { version = "0.2.12", features = ["ed25519", "peerid", "rsa"] }
 tokio = { version = "1.46.1", features = ["full"] }
 tracing = "0.1.41"
