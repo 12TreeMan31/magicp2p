@@ -1,11 +1,11 @@
 use futures::StreamExt;
 use libp2p::{
-    SwarmBuilder,
+    Swarm, SwarmBuilder,
     autonat::v2 as autonat,
     identify,
     identity::Keypair,
     noise, relay, rendezvous,
-    swarm::{NetworkBehaviour, Swarm, SwarmEvent},
+    swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux,
 };
 use magicp2p::{self, behaviour::PROGRAM_PROTOCOL};
@@ -44,21 +44,21 @@ impl Behaviour {
     }
 }
 
-fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
+fn network_handle(event: BehaviourEvent, swarm: &Swarm<Behaviour>) {
     match event {
         BehaviourEvent::Identify(e) => match e {
             identify::Event::Received { peer_id, info, .. } => {
-                info!("Found peer {}: supports {:#?}", peer_id, info.protocols);
+                info!("<{}> supports {:#?}", peer_id, info.protocols);
             }
             identify::Event::Error { peer_id, error, .. } => {
-                error!("Error with {} getting peer info: {}", peer_id, error);
+                error!("Error with <{}> getting peer info: {}", peer_id, error);
             }
             _ => {}
         },
         BehaviourEvent::Rendezvous(e) => match e {
             rendezvous::server::Event::PeerRegistered { peer, registration } => info!(
-                target: "rendezvous", "Regestered: {} to {}: TTL {}",
-                peer, registration.namespace, registration.ttl
+                target: "rendezvous", "Regestered: <{}> to {}: TTL {}, peer connected = {}",
+                peer, registration.namespace, registration.ttl, swarm.is_connected(&peer)
             ),
             rendezvous::server::Event::PeerUnregistered { peer, namespace } => {
                 info!(target: "rendezvous", "Deregestered {} from {}", peer, namespace)
@@ -71,7 +71,13 @@ fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
                 "rendezvous: Failed to regester: {} to {}: {:?}",
                 peer, namespace, error
             ),
-            _ => {}
+            rendezvous::server::Event::DiscoverServed {
+                enquirer,
+                registrations,
+            } => {
+                info!(target: "rendezvous", "Served <{}> {} registration(s)", enquirer, registrations.len());
+            }
+            e => warn!(?e),
         },
         BehaviourEvent::Autonat(e) => {
             if e.result.is_ok() {
@@ -83,7 +89,7 @@ fn network_handle(swarm: &mut Swarm<Behaviour>, event: BehaviourEvent) {
                 );
             }
         }
-        _ => {}
+        BehaviourEvent::Relay(event) => info!("{:?}", event),
     }
 }
 
@@ -113,14 +119,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let event = swarm.select_next_some().await;
         match event {
             SwarmEvent::NewListenAddr { address, .. } => info!("Listening on {}", address),
-            SwarmEvent::Behaviour(netinfo) => network_handle(&mut swarm, netinfo),
+            SwarmEvent::Behaviour(netinfo) => network_handle(netinfo, &swarm),
             SwarmEvent::ConnectionEstablished {
                 peer_id,
                 established_in: inter,
                 ..
-            } => info!("Connected to {} in {}ms", peer_id, inter.as_millis()),
+            } => info!("Connected to <{}> in {}ms", peer_id, inter.as_millis()),
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
-                info!("Connection closed for {}: {:?}", peer_id, cause)
+                if let Some(err) = cause {
+                    error!("Connection closed for <{}>: {}", peer_id, err)
+                }
             }
             _ => {}
         }
