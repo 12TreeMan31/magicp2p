@@ -1,15 +1,11 @@
 use clap::Parser;
 use futures::prelude::*;
-use libp2p::{
-    Multiaddr, PeerId, SwarmBuilder, gossipsub,
-    identity::Keypair,
-    noise, rendezvous,
-    swarm::{self, ConnectionId, Swarm, SwarmEvent, dial_opts::DialOpts},
-    tcp, yamux,
-};
+use libp2p::swarm::{self, ConnectionId, Swarm, SwarmEvent, dial_opts::DialOpts};
+use libp2p::{Multiaddr, SwarmBuilder, gossipsub, identity::Keypair, noise, tcp, yamux};
 use magicp2p::{
     self,
-    behaviour::{MainBehaviour, MainBehaviourEvent, NetworkInfo, SwarmOpts},
+    behaviour::{MainBehaviour, MainBehaviourEvent, SwarmOpts},
+    events::{ConnectionMonitor, Status},
 };
 use std::error::Error;
 use tokio::{
@@ -18,7 +14,7 @@ use tokio::{
     select,
     time::{self, Duration},
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 fn dial_remote(
@@ -34,70 +30,69 @@ fn dial_remote(
     Ok(id)
 }
 
-fn input_processing(
-    net: &NetworkInfo,
-    behaviour: &mut MainBehaviour,
-    input: String,
-    REMOVE: &PeerId,
-) {
-    if input.starts_with(':') {
-        if input.contains("scan") {
-            behaviour.get_peers(REMOVE);
-        }
-    }
-}
-
-fn network(
-    swarm: &mut Swarm<MainBehaviour>,
-    event: SwarmEvent<MainBehaviourEvent>,
-    id: &ConnectionId,
-) {
+fn network_handle(monitor: &mut ConnectionMonitor, event: SwarmEvent<MainBehaviourEvent>) {
     match event {
-        SwarmEvent::NewListenAddr { address, .. } => info!("Listening on {}", address),
-        SwarmEvent::Behaviour(netinfo) => {
-            let opts = magicp2p::behaviour::behaviour_handle(netinfo);
-            if let Some(x) = opts {
-                match x {
-                    SwarmOpts::Mdns(v) => {
-                        for dial in v {
-                            swarm.dial(dial);
-                        }
-                    }
-                    SwarmOpts::Rendezvous(reg, _) => {
-                        for peer in reg {
-                            let dial = DialOpts::peer_id(peer.record.peer_id())
-                                .addresses(peer.record.addresses().to_vec())
-                                .build();
-                            swarm.dial(dial);
-                        }
-                    }
-                    SwarmOpts::Disconnect(peer_id) => {}
-                }
-            }
+        SwarmEvent::Dialing { peer_id, .. } => {
+            info!("Dialing {:?}", peer_id);
+        }
+        SwarmEvent::NewListenAddr { address, .. } => {
+            info!("Listening on {}", address);
         }
         SwarmEvent::ExternalAddrConfirmed { address } => {
             info!("External address confirmed: {address}");
         }
-        SwarmEvent::ConnectionEstablished {
-            peer_id,
-            connection_id,
-            established_in,
-            ..
-        } => {
-            if connection_id == *id {
-                swarm
-                    .behaviour_mut()
-                    .rendezvous
-                    .register(
-                        rendezvous::Namespace::from_static("magic-test"),
-                        peer_id,
-                        None,
-                    )
-                    .unwrap();
-                info!("Connected to server in {}ms", established_in.as_millis());
+        SwarmEvent::ConnectionEstablished { established_in, .. } => {
+            info!("Connected to server in {}ms", established_in.as_millis());
+        }
+        SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+            if let Some(id) = peer_id {
+                error!("Connection error on {}: {}", id, error);
+            } else {
+                error!("Connection error on Unknown: {}", error);
             }
         }
-        event => warn!("Unhandled: {:?}", event),
+        SwarmEvent::Behaviour(event) => {
+            let opt = match magicp2p::behaviour::behaviour_handle(event) {
+                Some(x) => x,
+                None => return,
+            };
+
+            match opt {
+                SwarmOpts::Connect(list) => {
+                    for peer in list {
+                        let record = peer.record;
+
+                        let dial_request = DialOpts::peer_id(record.peer_id())
+                            .addresses(record.addresses().to_vec())
+                            .build();
+                        monitor.dial(dial_request);
+                    }
+                }
+                SwarmOpts::Identify(info) => {
+                    monitor.regester(&info);
+                }
+                SwarmOpts::Message(message) => {
+                    println!(
+                        "#{} <{:?}> {}",
+                        message.topic,
+                        message.source,
+                        String::from_utf8_lossy(&message.data)
+                    );
+                }
+                SwarmOpts::Mdns(list) => {
+                    for dail in list {
+                        /*if swarm.is_connected(&dail.get_peer_id().unwrap()) {
+                            continue;
+                        }
+
+                        if let Err(err) = swarm.dial(dail) {
+                            error!("Problem dialing peer: {}", err);
+                        }*/
+                    }
+                }
+            }
+        }
+        event => debug!("{:?}", event),
     }
 }
 
@@ -113,20 +108,16 @@ struct Opt {
     /// Disables mDNS
     #[arg(short, long)]
     mdns: bool,
-    /// REMOVE
-    #[arg(short, long)]
-    id: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        .with(fmt::layer().with_line_number(true).with_file(true))
         .with(EnvFilter::from_default_env())
         .init();
 
     let args: Opt = Opt::parse();
-    let REMOVE: PeerId = args.id.parse()?;
 
     let keys = Keypair::generate_ed25519();
     let mut swarm = SwarmBuilder::with_existing_identity(keys.clone())
@@ -144,39 +135,40 @@ async fn main() -> Result<(), Box<dyn Error>> {
         swarm.listen_on(format!("{}/tcp/0", addr).parse()?)?;
         // swarm.listen_on(format!("{}/udp/0/quic-v1", addr).parse()?)?;
     }
+    let mut monitor = ConnectionMonitor::new(swarm);
+
+    if let Some(bootnode) = args.bootnode {
+        let bootnode: Multiaddr = bootnode.parse()?;
+        let request = DialOpts::unknown_peer_id().address(bootnode).build();
+        // NOTE: We haven't confiremd the addr yet, we will do that later
+        monitor.dial(request);
+    }
 
     let mut stdin = io::BufReader::new(io::stdin()).lines();
 
-    let mut watched_connection = ConnectionId::new_unchecked(0);
-    if let Some(bootnode) = args.bootnode {
-        let bootnode: Multiaddr = bootnode.parse()?;
-        watched_connection = dial_remote(&mut swarm, &bootnode)?;
-    } else {
-        // Does nothing for now but sound spooky
-        info!("Starting in server mode!");
-    }
-
-    let mut netin = NetworkInfo::new();
-
     let topic = gossipsub::IdentTopic::new("hi-dave");
-    swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
+    // swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
 
+    let mut discover = time::interval(Duration::from_secs(5));
     print!("{}", magicp2p::BANNER);
-
-    let discover = time::interval(Duration::from_secs(10));
 
     loop {
         select! {
             Ok(Some(line)) = stdin.next_line() => {
-                input_processing(&mut netin, swarm.behaviour_mut(), line.clone(), &REMOVE);
                 if let Err(e) = swarm
                     .behaviour_mut().gossipsub
                     .publish(topic.clone(), line.as_bytes()) {
                     warn!("Publish error: {e:?}");
                 }
             }
-            event = swarm.select_next_some() => network(&mut swarm, event, &watched_connection),
-
+            event = swarm.select_next_some() => network_handle(&mut monitor, event),
+            _ = discover.tick() => {
+                for &server in monitor.get_rendezvous() {
+                    info!(?server);
+                    info!("Scanning: {}", server);
+                    swarm.behaviour_mut().rendezvous.discover(None, None, None, server);
+                }
+            }
         }
     }
 }

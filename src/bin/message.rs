@@ -1,13 +1,13 @@
+//! A basic messeging client for testing
+
 use clap::Parser;
 use futures::StreamExt;
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent, dial_opts::DialOpts};
-use libp2p::{Multiaddr, PeerId, SwarmBuilder, gossipsub, identity::Keypair, noise, tcp, yamux};
+use libp2p::{Multiaddr, SwarmBuilder, gossipsub, identity::Keypair, noise, tcp, yamux};
+use magicp2p::socket::{self, RequestType};
 use std::error::Error;
-use tokio::{
-    io::{self, AsyncBufReadExt},
-    select,
-    time::{self, Duration},
-};
+use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::{select, task};
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -25,40 +25,53 @@ struct Behaviour {
     gossipsub: gossipsub::Behaviour,
 }
 
-fn event_handle(swarm: &mut Swarm<Behaviour>, event: SwarmEvent<BehaviourEvent>) {
+fn event_handle(
+    swarm: &mut Swarm<Behaviour>,
+    event: SwarmEvent<BehaviourEvent>,
+    message_tx: &mut UnboundedSender<gossipsub::Event>,
+) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => info!("Listening on {}", address),
         SwarmEvent::ConnectionEstablished {
             peer_id,
             connection_id,
             endpoint,
-            num_established,
-            concurrent_dial_errors,
             established_in,
+            ..
         } => {
             info!(
                 "{} Connected to <{}> as a {:?} in {:?}",
                 connection_id, peer_id, endpoint, established_in
             );
         }
-        SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(e)) => match e {
-            gossipsub::Event::Message { message, .. } => {
-                println!(
-                    "#{} <{}> {}",
-                    message.topic,
-                    message.source.unwrap_or(PeerId::random()),
-                    String::from_utf8_lossy(&message.data)
-                );
-            }
-            gossipsub::Event::Subscribed { peer_id, topic } => {
-                println!("#{} <{}> Connected", topic, peer_id);
-            }
-            gossipsub::Event::Unsubscribed { peer_id, topic } => {
-                println!("#{} <{}> Disconnected", topic, peer_id);
-            }
-            _ => {}
-        },
+        SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(e)) => {
+            message_tx.send(e).expect("Channel closed")
+        }
         _ => {}
+    }
+}
+
+fn user_input_handle(swarm: &mut Swarm<Behaviour>, input: socket::RequestEvent) {
+    let topic = gossipsub::IdentTopic::new(input.channel());
+
+    match input.kind() {
+        RequestType::JOIN => {
+            if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&topic) {
+                error!("{}: {}", e, input.channel());
+            }
+        }
+        RequestType::PART => {
+            swarm.behaviour_mut().gossipsub.unsubscribe(&topic);
+        }
+        RequestType::MESG(text) => {
+            if let Err(e) = swarm
+                .behaviour_mut()
+                .gossipsub
+                .publish(topic, text.as_bytes())
+            {
+                warn!("{e}")
+            }
+        }
     }
 }
 
@@ -93,6 +106,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
     swarm.listen_on("/ip6/::/tcp/0".parse()?)?;
 
+    // Channel for keeping track of any requests that are made by the user (we are the receiver)
+    let (user_input_tx, mut user_input_rx) = mpsc::unbounded_channel::<socket::RequestEvent>();
+    // Chennel for sending any gossipsub events to the user thread (we are the sender)
+    let (mut message_tx, message_rx) = mpsc::unbounded_channel::<gossipsub::Event>();
+
+    // Spawns a seperate thread that is just for handling user input
+    task::spawn_blocking(async move || {
+        socket::user_socket_handler(
+            &["/ip6/::/tcp/1234".parse().unwrap()],
+            user_input_tx,
+            message_rx,
+        )
+        .await
+    });
+
     if let Some(addr) = args.relay {
         let addr: Multiaddr = addr.parse()?;
         let request = DialOpts::unknown_peer_id().address(addr.clone()).build();
@@ -102,21 +130,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let temp_topic = gossipsub::IdentTopic::new("magic");
     swarm.behaviour_mut().gossipsub.subscribe(&temp_topic)?;
-    let mut stdin = io::BufReader::new(io::stdin()).lines();
-
-    let mut discover = time::interval(Duration::from_secs(5));
-    let mut regester = time::interval(Duration::from_secs(5));
 
     loop {
         select! {
-            Ok(Some(line)) = stdin.next_line() => {
-                if let Err(e) = swarm
-                    .behaviour_mut().gossipsub
-                    .publish(temp_topic.clone(), line.as_bytes()) {
-                    warn!("Publish error: {e:?}");
-                }
-            }
-            event = swarm.select_next_some() => event_handle(&mut swarm, event)
+            Some(input) = user_input_rx.recv() => user_input_handle(&mut swarm, input),
+            event = swarm.select_next_some() => event_handle(&mut swarm, event, &mut message_tx)
         }
     }
 }

@@ -8,6 +8,7 @@ use libp2p::{
     Multiaddr, PeerId, SwarmBuilder, identify, identity::Keypair, mdns, noise, ping, relay::client,
     rendezvous, tcp, yamux,
 };
+use magicp2p::socket;
 use std::error::Error;
 use tokio::{
     select,
