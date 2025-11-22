@@ -1,21 +1,21 @@
-//! A basic messeging client for testing
+//! A basic messaging client for testing
 
 use clap::Parser;
 use futures::StreamExt;
-use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent, dial_opts::DialOpts};
+use libp2p::swarm::{DialError, NetworkBehaviour, Swarm, SwarmEvent, dial_opts::DialOpts};
 use libp2p::{Multiaddr, SwarmBuilder, gossipsub, identity::Keypair, noise, tcp, yamux};
-use magicp2p::socket::{self, RequestType};
+use magicp2p::socket;
 use std::error::Error;
+use std::thread;
 use tokio::sync::mpsc::{self, UnboundedSender};
-use tokio::{select, task};
+use tokio::{runtime, select};
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Opt {
-    #[arg(short, long)]
-    mdns: bool,
+    /// The address for remote server
     #[arg(short, long)]
     relay: Option<String>,
 }
@@ -23,6 +23,12 @@ struct Opt {
 #[derive(NetworkBehaviour)]
 struct Behaviour {
     gossipsub: gossipsub::Behaviour,
+}
+
+fn dial_unknown_peer(swarm: &mut Swarm<Behaviour>, addr: Multiaddr) -> Result<(), DialError> {
+    let request = DialOpts::unknown_peer_id().address(addr).build();
+    swarm.dial(request)?;
+    Ok(())
 }
 
 fn event_handle(
@@ -45,14 +51,17 @@ fn event_handle(
             );
         }
         SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(e)) => {
-            message_tx.send(e).expect("Channel closed")
+            if let Err(e) = message_tx.send(e) {
+                error!(?e);
+            }
         }
         _ => {}
     }
 }
 
-fn user_input_handle(swarm: &mut Swarm<Behaviour>, input: socket::RequestEvent) {
-    let topic = gossipsub::IdentTopic::new(input.channel());
+fn user_input_handle(swarm: &mut Swarm<Behaviour>, input: socket::ForwardRequest) {
+    info!(?input);
+    /*let topic = gossipsub::IdentTopic::new(input.channel());
 
     match input.kind() {
         RequestType::JOIN => {
@@ -72,7 +81,7 @@ fn user_input_handle(swarm: &mut Swarm<Behaviour>, input: socket::RequestEvent) 
                 warn!("{e}")
             }
         }
-    }
+    }*/
 }
 
 #[tokio::main]
@@ -107,25 +116,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on("/ip6/::/tcp/0".parse()?)?;
 
     // Channel for keeping track of any requests that are made by the user (we are the receiver)
-    let (user_input_tx, mut user_input_rx) = mpsc::unbounded_channel::<socket::RequestEvent>();
+    let (user_input_tx, mut user_input_rx) = mpsc::unbounded_channel::<socket::ForwardRequest>();
     // Chennel for sending any gossipsub events to the user thread (we are the sender)
     let (mut message_tx, message_rx) = mpsc::unbounded_channel::<gossipsub::Event>();
 
     // Spawns a seperate thread that is just for handling user input
-    task::spawn_blocking(async move || {
-        socket::user_socket_handler(
-            &["/ip6/::/tcp/1234".parse().unwrap()],
+    thread::spawn(move || {
+        let rt = runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("Could not start tokio runtime");
+
+        let interfaces: Multiaddr = "/ip4/0.0.0.0/udp/1234/quic-v1".parse().unwrap();
+
+        rt.block_on(socket::user_socket_handler(
+            interfaces,
             user_input_tx,
             message_rx,
-        )
-        .await
+        ));
     });
 
     if let Some(addr) = args.relay {
         let addr: Multiaddr = addr.parse()?;
-        let request = DialOpts::unknown_peer_id().address(addr.clone()).build();
-        let _ = swarm.dial(request).unwrap();
-        swarm.add_external_address(addr.clone());
+        dial_unknown_peer(&mut swarm, addr)?;
+        // DO I NEED THIS?????
+        // swarm.add_external_address(addr.clone());
     }
 
     let temp_topic = gossipsub::IdentTopic::new("magic");

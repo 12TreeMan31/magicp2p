@@ -6,14 +6,16 @@ use libp2p::swarm::{Stream, Swarm, SwarmEvent, dial_opts::DialOpts};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, request_response as reqres};
 use magicp2p::socket::*;
 use scanf::sscanf;
-use std::str;
-use std::thread;
+use std::{str, thread};
 use tokio::sync::mpsc;
 use tokio::{runtime, select};
 
-// Where the user is typeing
+const LISTEN_INTERFACE: &str = "/ip4/0.0.0.0/udp/0/quic-v1";
+const SERVER_INTERFACE: &str = "/ip4/0.0.0.0/udp/1234/quic-v1";
+
+/// Where the user is typing
 const INPUT_BOX: &str = "input_box";
-// Where messages are displayed
+/// Where messages are displayed
 const CHAT_DISPLAY: &str = "chat_display";
 
 enum SocketOpts {
@@ -98,6 +100,22 @@ fn command_parse(text: &str) -> Option<RequestEvent> {
     None
 }
 
+fn user_input_handle(
+    behaviour: &mut SocketBehaviour,
+    text: String,
+    ui_sink: &CbSink,
+    server_id: Option<PeerId>,
+) {
+    if let Some(req) = command_parse(&text) {
+        if let Some(peer_id) = server_id {
+            behaviour.send_request(&peer_id, req);
+        }
+    }
+
+    // Sends message to update the UI next frame
+    update_chat_display(&ui_sink, text);
+}
+
 fn init_swarm(interface: Multiaddr) -> Swarm<SocketBehaviour> {
     let mut swarm = SwarmBuilder::with_new_identity()
         .with_tokio()
@@ -105,9 +123,7 @@ fn init_swarm(interface: Multiaddr) -> Swarm<SocketBehaviour> {
         .with_behaviour(|_| SocketBehaviour::new_client())
         .expect("Wont fail")
         .build();
-    swarm
-        .listen_on("/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap())
-        .unwrap();
+    swarm.listen_on(LISTEN_INTERFACE.parse().unwrap()).unwrap();
     // Wrong because 0 is a random port and different from listen on
     // swarm.add_external_address("/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap());
 
@@ -122,7 +138,7 @@ fn swarm_event_handle(event: SwarmEvent<SocketBehaviourEvent>) -> Option<SocketO
     match event {
         SwarmEvent::ConnectionEstablished { peer_id, .. } => Some(SocketOpts::ServerFound(peer_id)),
         SwarmEvent::ConnectionClosed { peer_id, .. } => Some(SocketOpts::ServerLost(peer_id)),
-        // We don't need to handle the stream event
+        // We don't need to handle the stream event see `stream_message_handle()`
         SwarmEvent::Behaviour(SocketBehaviourEvent::Socket(event)) => match event {
             reqres::Event::Message { message, .. } => match message {
                 reqres::Message::Response { .. } => None,
@@ -135,11 +151,20 @@ fn swarm_event_handle(event: SwarmEvent<SocketBehaviourEvent>) -> Option<SocketO
     }
 }
 
+fn network_handle(event: SwarmEvent<SocketBehaviourEvent>, server_id: &mut Option<PeerId>) {
+    if let Some(e) = swarm_event_handle(event) {
+        match e {
+            SocketOpts::ServerFound(x) => *server_id = Some(x),
+            SocketOpts::ServerLost(_) => *server_id = None,
+        }
+    }
+}
+
 async fn stream_message_handle(mut data: Stream, ui_sink: &CbSink) {
     // Wow, some normal networking code
     let mut buf: Vec<u8> = vec![];
 
-    // messages are so small don't wait till end
+    // messages are so small don't read till end
     let _ = data.read(&mut buf).await;
 
     let message = str::from_utf8(&buf).unwrap();
@@ -149,10 +174,10 @@ async fn stream_message_handle(mut data: Stream, ui_sink: &CbSink) {
 
 /// Event loop the the networking code. It is expected for this to be on its own thread
 ///
-/// `client_rx` gets user input from `TEXT_BOX` while `ui_sink` is to send callbacks to
+/// `client_rx` gets user input from `INPUT_BOX` while `ui_sink` is to send callbacks to
 /// the cursive runtime.
 async fn network_manager(mut client_rx: mpsc::UnboundedReceiver<String>, ui_sink: CbSink) {
-    let mut swarm: Swarm<SocketBehaviour> = init_swarm(Multiaddr::empty());
+    let mut swarm: Swarm<SocketBehaviour> = init_swarm(SERVER_INTERFACE.parse().unwrap());
     let mut server_id: Option<PeerId> = None;
 
     // The stream that we will get all messages from
@@ -162,28 +187,10 @@ async fn network_manager(mut client_rx: mpsc::UnboundedReceiver<String>, ui_sink
         .accept(MAGIC_PROTOCOL)
         .expect("Won't fail");
 
-    // Not using functions here since we need to know almost all of the state of the the thread
-    let user_input_handle = |text: String| {
-        if let Some(_) = command_parse(&text) {
-            unimplemented!()
-        }
-
-        // Sends message to update the UI next frame
-        update_chat_display(&ui_sink, text);
-    };
-    let mut network_handle = |event: SwarmEvent<SocketBehaviourEvent>| {
-        if let Some(e) = swarm_event_handle(event) {
-            match e {
-                SocketOpts::ServerFound(x) => server_id = Some(x),
-                SocketOpts::ServerLost(_) => server_id = None,
-            }
-        }
-    };
-
     loop {
         select! {
-            Some(text) = client_rx.recv() => user_input_handle(text),
-            event = swarm.select_next_some() => network_handle(event),
+            Some(text) = client_rx.recv() => user_input_handle(swarm.behaviour_mut(), text, &ui_sink, server_id),
+            event = swarm.select_next_some() => network_handle(event, &mut server_id),
             Some((_, message)) = message_stream.next() => stream_message_handle(message, &ui_sink).await,
 
         }
@@ -191,13 +198,14 @@ async fn network_manager(mut client_rx: mpsc::UnboundedReceiver<String>, ui_sink
 }
 
 fn main() {
+    // For messages sent from `INPUT_BOX`
     let (client_tx, client_rx) = mpsc::unbounded_channel::<String>();
 
     let mut siv = setup_layout(client_tx);
 
     // See cb_sink docs for why the fps counter
     siv.set_fps(30);
-    // We can clone since its an alias for a crossbeam channel.
+    // An alias for a crossbeam channel.
     let ui_sink: CbSink = siv.cb_sink().clone();
 
     thread::spawn(move || {

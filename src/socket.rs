@@ -13,17 +13,23 @@
 
 // use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use futures::{AsyncWriteExt, StreamExt};
 use libp2p::request_response::{self as reqres, ProtocolSupport, cbor};
-use libp2p::swarm::NetworkBehaviour;
-use libp2p::{PeerId, StreamProtocol};
+use libp2p::swarm::{NetworkBehaviour, Stream, Swarm, SwarmEvent, dial_opts::DialOpts};
+use libp2p::{Multiaddr, PeerId, StreamProtocol, SwarmBuilder, gossipsub};
 use libp2p_stream as stream;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tracing::info;
+
+pub const MAGIC_PROTOCOL: StreamProtocol = StreamProtocol::new("/magic");
 
 #[derive(Serialize, Deserialize, Debug, Clone, derive_more::FromStr)]
 pub enum RequestType {
     JOIN,
     PART,
     MESG,
+    STRM,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -31,6 +37,7 @@ pub struct RequestEvent {
     pub kind: RequestType,
     // TODO: Make a multihash
     pub channel: String,
+    // Right now is only for messages
     pub data: Option<String>,
 }
 
@@ -40,17 +47,8 @@ pub enum ResponseEvent {
     Err,
 }
 
-pub type Behaviour = cbor::Behaviour<RequestEvent, ResponseEvent>;
-pub type Event = reqres::Event<RequestEvent, ResponseEvent>;
-
-pub const PROTOCOL: StreamProtocol = StreamProtocol::new("/magic");
-pub const CLIENT_PROTOCOL: (StreamProtocol, ProtocolSupport) =
-    (PROTOCOL, ProtocolSupport::Outbound);
-pub(crate) const SERVER_PROTOCOL: (StreamProtocol, ProtocolSupport) =
-    (PROTOCOL, ProtocolSupport::Inbound);
-
 #[derive(NetworkBehaviour)]
-struct SocketBehaviour {
+pub struct SocketBehaviour {
     socket: cbor::Behaviour<RequestEvent, ResponseEvent>,
     stream: stream::Behaviour,
 }
@@ -58,7 +56,7 @@ struct SocketBehaviour {
 impl SocketBehaviour {
     pub fn new_client() -> Self {
         let socket = cbor::Behaviour::new(
-            [(PROTOCOL, ProtocolSupport::Outbound)],
+            [(MAGIC_PROTOCOL, ProtocolSupport::Outbound)],
             reqres::Config::default(),
         );
         let stream = stream::Behaviour::new();
@@ -66,7 +64,7 @@ impl SocketBehaviour {
     }
     pub(crate) fn new_server() -> Self {
         let socket = cbor::Behaviour::new(
-            [(PROTOCOL, ProtocolSupport::Inbound)],
+            [(MAGIC_PROTOCOL, ProtocolSupport::Inbound)],
             reqres::Config::default(),
         );
 
@@ -90,187 +88,112 @@ impl SocketBehaviour {
     }
 }
 
-/* #[derive(NetworkBehaviour)]
-pub struct Behaviour {
-    pub socket: cbor::Behaviour<RequestEvent, ResponseEvent>,
+#[derive(Debug)]
+pub enum ForwardRequest {
+    Message { text: String, channel: String },
+    Subscribe { channel: String },
+    Unsubscribe { channel: String },
 }
 
-impl Behaviour {
-    pub fn new_client() -> Self {
-        unimplemented!()
-    }
-    pub(crate) fn new_server() -> Self {
-        unimplemented!()
-    }
-    pub fn join(&mut self, server_id: PeerId, channel: String) {}
-    pub fn part(&mut self, server_id: PeerId, channel: String) {}
-    pub fn publish(&mut self, server_id: PeerId, channel: String) {}
+/// Actions to preform based on events ganerated
+enum SwarmOpts {
+    OpenStream,
+    Forward(ForwardRequest),
+    ClientFound(PeerId),
+    ClientLost(PeerId),
 }
 
-impl NetworkBehaviour for Behaviour {
-    type ConnectionHandler = ;
-
-    fn handle_established_inbound_connection(
-        &mut self,
-        _connection_id: libp2p::swarm::ConnectionId,
-        peer: PeerId,
-        local_addr: &Multiaddr,
-        remote_addr: &Multiaddr,
-    ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        self.socket.handle_established_inbound_connection(
-            _connection_id,
-            peer,
-            local_addr,
-            remote_addr,
-        )
-    }
-    fn handle_established_outbound_connection(
-        &mut self,
-        _connection_id: libp2p::swarm::ConnectionId,
-        peer: PeerId,
-        addr: &Multiaddr,
-        role_override: libp2p::core::Endpoint,
-        port_use: libp2p::core::transport::PortUse,
-    ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
-        self.socket.handle_established_outbound_connection(
-            _connection_id,
-            peer,
-            addr,
-            role_override,
-            port_use,
-        )
-    }
-    fn handle_pending_inbound_connection(
-        &mut self,
-        _connection_id: libp2p::swarm::ConnectionId,
-        _local_addr: &Multiaddr,
-        _remote_addr: &Multiaddr,
-    ) -> Result<(), libp2p::swarm::ConnectionDenied> {
-        self.socket
-            .handle_pending_inbound_connection(_connection_id, _local_addr, _remote_addr)
-    }
-    fn handle_pending_outbound_connection(
-        &mut self,
-        _connection_id: libp2p::swarm::ConnectionId,
-        _maybe_peer: Option<PeerId>,
-        _addresses: &[Multiaddr],
-        _effective_role: libp2p::core::Endpoint,
-    ) -> Result<Vec<Multiaddr>, libp2p::swarm::ConnectionDenied> {
-        self.socket.handle_pending_outbound_connection(
-            _connection_id,
-            _maybe_peer,
-            _addresses,
-            _effective_role,
-        )
-    }
-    fn on_connection_handler_event(
-        &mut self,
-        _peer_id: PeerId,
-        _connection_id: libp2p::swarm::ConnectionId,
-        _event: libp2p::swarm::THandlerOutEvent<Self>,
-    ) {
-        self.socket
-            .on_connection_handler_event(_peer_id, _connection_id, _event);
-    }
-    fn on_swarm_event(&mut self, event: libp2p::swarm::FromSwarm) {
-        self.socket.on_swarm_event(event);
-    }
-    fn poll(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<libp2p::swarm::ToSwarm<Self::ToSwarm, libp2p::swarm::THandlerInEvent<Self>>>
-    {
-        self.socket.poll(cx)
-    }
-}*/
-
-////
-
-////
-
-/*impl Deref for Behaviour {
-    type Target = cbor::Behaviour<RequestEvent, ResponseEvent>;
-    fn deref(&self) -> &Self::Target {
-        &self.socket
-    }
-}
-
-fn init_swarm(interface: &[Multiaddr]) -> Swarm<Behaviour> {
+fn init_swarm(interface: Multiaddr) -> Swarm<SocketBehaviour> {
     let mut swarm = SwarmBuilder::with_new_identity()
         .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )
-        .expect("Could not configure transport")
-        .with_behaviour(|_| Behaviour::new())
-        .expect("Could not init behaviour")
+        .with_quic()
+        .with_behaviour(|_| SocketBehaviour::new_server())
+        .expect("Won't fail")
         .build();
 
-    for addr in interface {
-        let res = swarm.listen_on(addr.clone());
-        if let Err(err) = res {
-            error!(target: "socket", "Could not bind on {}", err)
-        }
-    }
+    let dial = DialOpts::unknown_peer_id().address(interface).build();
+    swarm.dial(dial).unwrap();
 
     swarm
 }
 
-fn inbound_handle(
-    swarm: &mut Swarm<Behaviour>,
-    event: SwarmEvent<BehaviourEvent>,
-    input: &mut UnboundedSender<RequestEvent>,
-) {
+fn swarm_event_handle(event: SwarmEvent<SocketBehaviourEvent>) -> Option<SwarmOpts> {
     match event {
-        SwarmEvent::NewListenAddr { address, .. } => info!("Listening on {}", address),
-        SwarmEvent::Behaviour(e) => match e {
-            BehaviourEvent::Socket(e) => {}
+        SwarmEvent::NewListenAddr { address, .. } => {
+            info!("Listening on {}", address);
+            None
+        }
+        SwarmEvent::ConnectionEstablished { peer_id, .. } => Some(SwarmOpts::ClientFound(peer_id)),
+        SwarmEvent::ConnectionClosed { peer_id, cause, .. } => Some(SwarmOpts::ClientLost(peer_id)),
+        // We don't need to handle the stream event
+        SwarmEvent::Behaviour(SocketBehaviourEvent::Socket(e)) => match e {
+            reqres::Event::Message { message, .. } => match message {
+                // THIS IS WHERE WE GET `Event::InboundFailure` on the client!
+                reqres::Message::Request {
+                    request, channel, ..
+                } => match request.kind {
+                    RequestType::JOIN => Some(SwarmOpts::Forward(ForwardRequest::Subscribe {
+                        channel: request.channel,
+                    })),
+                    RequestType::PART => Some(SwarmOpts::Forward(ForwardRequest::Unsubscribe {
+                        channel: request.channel,
+                    })),
+                    RequestType::STRM => Some(SwarmOpts::OpenStream),
+                    RequestType::MESG => match request.data {
+                        Some(text) => Some(SwarmOpts::Forward(ForwardRequest::Message {
+                            text,
+                            channel: request.channel,
+                        })),
+                        _ => None, // Empty message so don't forward
+                    },
+                },
+                _ => unreachable!(), // We shouldn't ever get a response
+            },
+            reqres::Event::ResponseSent { request_id, .. } => None,
+            reqres::Event::InboundFailure {
+                request_id, error, ..
+            } => None,
+            _ => unreachable!(), // We don't send requests
         },
-        _ => {}
+        _ => None,
     }
 }
 
-fn outbound_handle(swarm: &mut Swarm<Behaviour>, msg: gossipsub::Event) {
-    match msg {
+async fn inbound_handle(
+    event: SwarmEvent<SocketBehaviourEvent>,
+    message_control: &mut libp2p_stream::Control,
+    message_stream: &mut Option<Stream>,
+    user_input_tx: &mut UnboundedSender<ForwardRequest>,
+    client_id: &mut Option<PeerId>,
+) {
+    let opt = match swarm_event_handle(event) {
+        Some(x) => x,
+        _ => return,
+    };
+
+    match opt {
+        SwarmOpts::ClientFound(peer_id) => *client_id = Some(peer_id),
+        SwarmOpts::ClientLost(_) => *client_id = None,
+        SwarmOpts::Forward(req) => user_input_tx.send(req).unwrap(),
+        SwarmOpts::OpenStream => {
+            if let Some(peer_id) = client_id {
+                *message_stream = Some(
+                    message_control
+                        .open_stream(*peer_id, MAGIC_PROTOCOL)
+                        .await
+                        .unwrap(),
+                );
+            }
+        }
+    }
+}
+
+async fn outbound_handle(event: gossipsub::Event, message_stream: &mut Option<Stream>) {
+    match event {
         gossipsub::Event::Message { message, .. } => {
-            let message_text = match str::from_utf8(&message.data) {
-                Ok(x) => x,
-                Err(e) => {
-                    error!("{}", e);
-                    return;
-                }
-            };
-            // Sometimes we don't get a peer_id
-            match message.source {
-                Some(peer_id) => info!("#{} <{}> {}", message.topic, peer_id, message_text),
-                None => info!("#{} <Unknown> {}", message.topic, message_text),
+            if let Some(stream) = message_stream {
+                stream.write_all(&message.data).await.unwrap();
             }
-
-            let request = RequestEvent {
-                channel: message.topic.into_string(),
-                kind: RequestType::MESG(message_text.to_string()),
-            };
-
-            // We have to fight with the borrow checker here
-            let connected_peers: Vec<PeerId> = swarm
-                .connected_peers()
-                .map(|peer_id| peer_id.clone())
-                .collect();
-            // For now broadcast to everyone
-            for peer in connected_peers {
-                swarm
-                    .behaviour_mut()
-                    .socket
-                    .send_request(&peer, request.clone());
-            }
-        }
-        gossipsub::Event::Subscribed { peer_id, topic } => {
-            info!("#{} <{}> Connected", topic, peer_id);
-        }
-        gossipsub::Event::Unsubscribed { peer_id, topic } => {
-            info!("#{} <{}> Disconnected", topic, peer_id);
         }
         _ => {}
     }
@@ -284,17 +207,21 @@ fn outbound_handle(swarm: &mut Swarm<Behaviour>, msg: gossipsub::Event) {
 /// `message_rx` is for recving all pubsub event generated by magic
 /// which will then be sent to the user as is.
 pub async fn user_socket_handler(
-    interface: &[Multiaddr],
-    mut user_input_tx: UnboundedSender<RequestEvent>,
+    interface: Multiaddr,
+    mut user_input_tx: UnboundedSender<ForwardRequest>,
     mut message_rx: UnboundedReceiver<gossipsub::Event>,
 ) -> ! {
     let mut swarm = init_swarm(interface);
-    warn!("Broadcasting to all peers");
+    let mut client_id: Option<PeerId> = None;
+    // Stream to send pubsub messages to user
+    let mut message_control = swarm.behaviour().new_control();
+
+    let mut message_stream: Option<Stream> = None;
 
     loop {
-        select! {
-            Some(event) = message_rx.recv() => outbound_handle(&mut swarm, event),
-            event = swarm.select_next_some() => inbound_handle(&mut swarm, event, &mut user_input_tx),
+        tokio::select! {
+            Some(event) = message_rx.recv() => outbound_handle(event, &mut message_stream).await,
+            event = swarm.select_next_some() => inbound_handle(event, &mut message_control, &mut message_stream, &mut user_input_tx, &mut client_id).await,
         }
     }
-} */
+}

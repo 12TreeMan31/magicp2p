@@ -1,3 +1,6 @@
+[workspace]
+members = ["client"]
+
 [package]
 name = "magicp2p"
 version = "0.1.0"
@@ -7,8 +10,10 @@ edition = "2024"
 serde = { version = "1.0", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
 futures = "0.3.31"
-libp2p = { version = "0.56", features = ["noise", "dns", "tokio", "yamux", "tcp", "mdns", "macros", "gossipsub", "relay", "rendezvous", "identify", "autonat", "request-response", "cbor", "ping"] }
+libp2p = { version = "0.56", features = ["noise", "dns", "tokio", "yamux", "tcp", "mdns", "macros", "gossipsub", "relay", "rendezvous", "identify", "autonat", "request-response", "cbor", "ping", "quic"] }
 libp2p-identity = { version = "0.2.12", features = ["ed25519", "peerid", "rsa"] }
-tokio = { version = "1.46.1", features = ["full"] }
+tokio = { version = "1.46.1", features = ["full", "rt"] }
 tracing = "0.1.41"
 tracing-subscriber = {version = "0.3.20", features = ["env-filter"] }
+derive_more = {version = "2.0.1", features = ["from_str"] }
+libp2p-stream = "0.4.0-alpha"

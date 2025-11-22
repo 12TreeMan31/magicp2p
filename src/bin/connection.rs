@@ -1,3 +1,5 @@
+//! Basic client for testing EVERYTHING
+
 use clap::Parser;
 use futures::StreamExt;
 use libp2p::swarm::{
